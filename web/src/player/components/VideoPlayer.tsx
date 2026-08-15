@@ -33,6 +33,7 @@ import type {
 import { resolvePendingSeekTime } from "../utils/pendingSeek";
 import { resolveVersionAudioLanguage } from "../utils/effectiveAudioLanguage";
 import { HlsStartupGuard } from "../utils/hlsStartupGuard";
+import { selectHLSEngineV3 } from "../utils/hlsEngine";
 import { normalizeSubtitleMode } from "../utils/subtitleMode";
 import type {
   PlaybackExitState,
@@ -1367,6 +1368,7 @@ export function VideoPlayer({
   // Only the bitrate matters for buffer sizing, and the plan states what is
   // actually being delivered rather than what the source file happens to hold.
   const plannedBitrateKbps = plan.effective_recipe.bitrate_kbps ?? 0;
+  const plannedDynamicRange = plan.effective_recipe.dynamic_range;
 
   // -- hls.js lifecycle --
   useEffect(() => {
@@ -1412,6 +1414,15 @@ export function VideoPlayer({
     video.addEventListener("loadeddata", attemptAutoplayWhenReady);
     video.addEventListener("canplay", attemptAutoplayWhenReady);
 
+    const attachNativeHLS = () => {
+      video.src = effectiveStreamUrl;
+      nativeHLSMetadataHandler = () => {
+        video.currentTime = effectiveInitialPosition;
+        attemptAutoplayWhenReady();
+      };
+      video.addEventListener("loadedmetadata", nativeHLSMetadataHandler, { once: true });
+    };
+
     async function init() {
       if (!video || destroyed) return;
 
@@ -1420,7 +1431,12 @@ export function VideoPlayer({
           const Hls = await hlsPromise;
           if (destroyed || hlsStartupGuardRef.current?.hasFailed()) return;
 
-          if (Hls.isSupported()) {
+          const nativeSupported = video.canPlayType("application/vnd.apple.mpegurl") !== "";
+          const engine = selectHLSEngineV3(plannedDynamicRange, nativeSupported, Hls.isSupported());
+
+          if (engine === "native") {
+            attachNativeHLS();
+          } else if (engine === "hlsjs") {
             const maxBufferLength = plannedBitrateKbps >= 25000 ? 60 : 120;
             const retryingLoadPolicy = {
               maxTimeToFirstByteMs: 45000,
@@ -1518,13 +1534,6 @@ export function VideoPlayer({
             hls.loadSource(effectiveStreamUrl);
             hls.attachMedia(video);
             hlsRef.current = hls;
-          } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-            video.src = effectiveStreamUrl;
-            nativeHLSMetadataHandler = () => {
-              video.currentTime = effectiveInitialPosition;
-              attemptAutoplayWhenReady();
-            };
-            video.addEventListener("loadedmetadata", nativeHLSMetadataHandler, { once: true });
           } else {
             if (
               !reportCurrentPlanFailure({
@@ -1581,6 +1590,7 @@ export function VideoPlayer({
     isPlayerReady,
     planRevision,
     plannedBitrateKbps,
+    plannedDynamicRange,
     reportCurrentPlanFailure,
     shouldAutoPlay,
   ]);

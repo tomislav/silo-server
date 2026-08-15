@@ -23,6 +23,7 @@ const subtitleTimeline = vi.hoisted(() => ({
   assOffsetSeconds: null as number | null,
 }));
 const toastError = vi.hoisted(() => vi.fn());
+const hlsJS = vi.hoisted(() => ({ supported: false, constructed: vi.fn() }));
 
 vi.mock("sonner", () => ({ toast: { error: toastError, success: vi.fn(), message: vi.fn() } }));
 
@@ -61,7 +62,26 @@ vi.mock("../hooks/useSubtitleAppearance", () => ({
 vi.mock("../hooks/useSubtitleLayout", () => ({
   useSubtitleLayout: () => ({ positionStyle: {}, fontScale: 1 }),
 }));
-vi.mock("hls.js", () => ({ default: { isSupported: () => false } }));
+vi.mock("hls.js", () => ({
+  default: class MockHls {
+    static Events = {
+      ERROR: "error",
+      MANIFEST_PARSED: "manifestParsed",
+      BUFFER_APPENDED: "bufferAppended",
+    };
+    static ErrorTypes = { NETWORK_ERROR: "networkError", MEDIA_ERROR: "mediaError" };
+    static isSupported = () => hlsJS.supported;
+
+    constructor() {
+      hlsJS.constructed();
+    }
+
+    on() {}
+    loadSource() {}
+    attachMedia() {}
+    destroy() {}
+  },
+}));
 vi.mock("./PlayerControls", () => ({
   PlayerControls: vi.fn(
     (props: { activeSubtitleIndex: number | null; subtitleTracks: PlayerSubtitleInfo[] }) => {
@@ -134,6 +154,8 @@ describe("VideoPlayer plan failure recovery", () => {
     controls.current = null;
     subtitleTimeline.textOffsetSeconds = null;
     subtitleTimeline.assOffsetSeconds = null;
+    hlsJS.supported = false;
+    hlsJS.constructed.mockClear();
     toastError.mockClear();
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
@@ -349,6 +371,8 @@ describe("VideoPlayer native HLS timeline", () => {
     controls.current = null;
     subtitleTimeline.textOffsetSeconds = null;
     subtitleTimeline.assOffsetSeconds = null;
+    hlsJS.supported = false;
+    hlsJS.constructed.mockClear();
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
     vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
@@ -390,6 +414,41 @@ describe("VideoPlayer native HLS timeline", () => {
     expect(video.currentTime).toBe(7);
     expect(subtitleTimeline.textOffsetSeconds).toBe(0);
     expect(subtitleTimeline.assOffsetSeconds).toBe(0);
+  });
+
+  it("uses native HLS for Dolby Vision when hls.js is also available", async () => {
+    hlsJS.supported = true;
+    const plan = fixturePlanV3({
+      delivery: "server_remux_hls",
+      stream: {
+        url: "/playback/transcode/session-1/master.m3u8",
+        protocol: "hls",
+        headers: {},
+        header_refresh: "none",
+      },
+      effective_recipe: {
+        video_codec: "hevc",
+        audio_codec: "eac3",
+        dynamic_range: "dolby_vision",
+      },
+      timeline: {
+        source_start_seconds: 42,
+        stream_origin_seconds: 35,
+        player_start_seconds: 7,
+        timeline_offset_seconds: 0,
+        can_seek_anywhere: false,
+        seek_restoration: "source_position",
+      },
+    });
+    const { container } = renderPlayer({ plan, initialPosition: 42 });
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+
+    await waitFor(() => expect(video.src).toContain("/api/v1/stream/session-1"));
+    fireEvent.loadedMetadata(video);
+
+    expect(video.currentTime).toBe(7);
+    expect(hlsJS.constructed).not.toHaveBeenCalled();
   });
 });
 
